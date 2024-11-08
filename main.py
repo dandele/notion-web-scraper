@@ -4,21 +4,55 @@ from bs4 import BeautifulSoup
 import time
 from notion_client import Client  # Importa il client di Notion
 
-# Definisci gli header per la richiesta HTTP
+# Definisci gli headers per la richiesta HTTP
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                   'AppleWebKit/537.36 (KHTML, like Gecko) '
                   'Chrome/86.0.4240.183 Safari/537.36'
 }
 
-# Inizializza il client di Notion utilizzando il token API
-notion = Client(auth=os.getenv('NOTION_SECRET_KEY'))  # Legge il token API dalla variabile d'ambiente
-
-# ID del database Notion
-database_id = os.getenv('DATABASE_ID')  # Legge il Database ID dalla variabile d'ambiente
+# Inizializza il client di Notion utilizzando le variabili d'ambiente
+notion = Client(auth=os.getenv('NOTION_SECRET_KEY'))
+database_id = os.getenv('DATABASE_ID')
 
 # Lista per memorizzare tutti gli articoli
 all_articles = []
+
+def get_existing_links(notion, database_id):
+    existing_links = set()
+    try:
+        # Notion API ha un limite di 100 risultati per query; usiamo il cursore per paginare
+        response = notion.databases.query(
+            database_id=database_id,
+            page_size=100
+        )
+        results = response.get('results', [])
+        for page in results:
+            # Assumiamo che "Link" sia il nome della proprietà contenente l'URL
+            link_property = page['properties'].get('Link')
+            if link_property and link_property['type'] == 'rich_text':
+                rich_text = link_property.get('rich_text', [])
+                if rich_text:
+                    link = rich_text[0]['text']['content']
+                    existing_links.add(link)
+        # Gestione della paginazione
+        while response.get('has_more'):
+            response = notion.databases.query(
+                database_id=database_id,
+                start_cursor=response.get('next_cursor'),
+                page_size=100
+            )
+            results = response.get('results', [])
+            for page in results:
+                link_property = page['properties'].get('Link')
+                if link_property and link_property['type'] == 'rich_text':
+                    rich_text = link_property.get('rich_text', [])
+                    if rich_text:
+                        link = rich_text[0]['text']['content']
+                        existing_links.add(link)
+    except Exception as e:
+        print(f'Errore durante il recupero dei link esistenti da Notion: {e}')
+    return existing_links
 
 # Funzione per ottenere gli articoli da una pagina specifica
 def get_articles_from_page(url):
@@ -52,7 +86,8 @@ def get_articles_from_page(url):
                 else:
                     article_title = None
 
-                articles.append({'article_title': article_title, 'link': link})
+                if link and article_title:
+                    articles.append({'article_title': article_title, 'link': link})
         else:
             print('Contenitore degli articoli non trovato.')
     else:
@@ -154,6 +189,10 @@ def add_to_notion(article_title, link, prompt_title, content):
         print(f'Errore durante l\'inserimento su Notion: {e}')
 
 def main():
+    # Recupera gli URL esistenti da Notion
+    existing_links = get_existing_links(notion, database_id)
+    print(f'Numero di link già presenti in Notion: {len(existing_links)}')
+
     # Inizializza l'URL base
     base_url = 'https://www.superhuman.ai/archive?page='
 
@@ -170,34 +209,37 @@ def main():
         time.sleep(2)  # Pausa tra le richieste
 
     # Rimuovi eventuali duplicati
-    unique_articles = {article['link']: article for article in all_articles}.values()
+    unique_articles = [article for article in all_articles if article['link'] not in existing_links]
 
-    print(f'\nNumero totale di articoli trovati: {len(unique_articles)}\n')
+    print(f'\nNumero totale di nuovi articoli da aggiungere: {len(unique_articles)}\n')
 
-    # Itera su ciascun articolo e ottieni il contenuto
-    for article in unique_articles:
-        article_title = article['article_title']
-        link = article['link']
+    if unique_articles:
+        # Itera su ciascun articolo e ottieni il contenuto
+        for article in unique_articles:
+            article_title = article['article_title']
+            link = article['link']
 
-        print(f'Titolo Articolo: {article_title}')
-        print(f'Link: {link}')
+            print(f'Titolo Articolo: {article_title}')
+            print(f'Link: {link}')
 
-        if link:
-            content, prompt_title = get_content_from_article(link)
-            print('Titolo del Prompt estratto:')
-            print(prompt_title)
-            print('Contenuto estratto:')
-            print(content)
-        else:
-            print('Link non valido.')
-            content = 'Link non valido.'
-            prompt_title = 'Titolo del prompt non trovato.'
+            if link:
+                content, prompt_title = get_content_from_article(link)
+                print('Titolo del Prompt estratto:')
+                print(prompt_title)
+                print('Contenuto estratto:')
+                print(content)
+            else:
+                print('Link non valido.')
+                content = 'Link non valido.'
+                prompt_title = 'Titolo del prompt non trovato.'
 
-        # Inserisci i dati nel database Notion
-        add_to_notion(article_title, link, prompt_title, content)
+            # Inserisci i dati nel database Notion
+            add_to_notion(article_title, link, prompt_title, content)
 
-        print('---------------------')
-        time.sleep(2)  # Pausa tra le richieste
+            print('---------------------')
+            time.sleep(2)  # Pausa tra le richieste
+    else:
+        print('Nessun nuovo prompt trovato. Nessuna azione da eseguire.')
 
 if __name__ == '__main__':
     main()
